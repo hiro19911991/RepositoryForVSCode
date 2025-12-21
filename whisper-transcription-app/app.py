@@ -11,6 +11,10 @@ import whisper
 import torch
 import streamlit as st
 from datetime import datetime
+import librosa
+import numpy as np
+import soundfile as sf
+from pydub import AudioSegment
 
 # ページ設定
 st.set_page_config(
@@ -42,6 +46,177 @@ def get_available_models():
         "large", 
         "turbo"
     ]
+
+def split_audio_into_chunks(audio_path, chunk_duration_seconds=480):
+    """
+    音声ファイルを指定された長さのチャンクに分割する
+    
+    Args:
+        audio_path: 音声ファイルのパス
+        chunk_duration_seconds: チャンクの長さ（秒）デフォルト8分（480秒）
+    
+    Returns:
+        list: 分割されたチャンクファイルのパスのリスト
+    """
+    try:
+        # pydubを使用して音声ファイルを読み込み
+        audio = AudioSegment.from_file(audio_path)
+        total_duration_ms = len(audio)
+        chunk_duration_ms = chunk_duration_seconds * 1000
+        
+        chunk_files = []
+        chunk_count = 0
+        
+        for start_time in range(0, total_duration_ms, chunk_duration_ms):
+            end_time = min(start_time + chunk_duration_ms, total_duration_ms)
+            chunk = audio[start_time:end_time]
+            
+            # チャンクファイルの保存
+            base_name = os.path.splitext(audio_path)[0]
+            chunk_filename = f"{base_name}_chunk_{chunk_count:03d}.wav"
+            chunk.export(chunk_filename, format="wav")
+            
+            chunk_files.append(chunk_filename)
+            chunk_count += 1
+            
+        return chunk_files
+    
+    except Exception as e:
+        st.error(f"音声分割エラー: {str(e)}")
+        return []
+
+def transcribe_chunks(model, chunk_files, options, progress_callback=None, chunk_duration_seconds=480):
+    """
+    複数のチャンクを順次転写処理する
+    
+    Args:
+        model: Whisperモデル
+        chunk_files: チャンクファイルのパスのリスト
+        options: 転写オプション
+        progress_callback: 進捗コールバック関数
+        chunk_duration_seconds: チャンクの長さ（秒）
+    
+    Returns:
+        dict: 統合された転写結果
+    """
+    all_segments = []
+    full_text = ""
+    time_offset = 0.0
+    detected_language = "unknown"
+    
+    for i, chunk_file in enumerate(chunk_files):
+        try:
+            if progress_callback:
+                progress_callback(f"チャンク {i+1}/{len(chunk_files)} を処理中...")
+            
+            # ハルシネーション対策の強化されたオプション
+            chunk_options = options.copy()
+            chunk_options.update({
+                "condition_on_previous_text": False,  # 前のテキストに依存しない
+                "compression_ratio_threshold": 2.4,  # 圧縮率でハルシネーション検出
+                "logprob_threshold": -1.0,  # 確率でハルシネーション検出
+                "no_speech_threshold": 0.6,  # 無音検出の閾値
+                "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],  # 温度を段階的に上げる
+            })
+            
+            # チャンクを転写
+            result = model.transcribe(chunk_file, **chunk_options)
+            
+            # 言語検出（最初のチャンクから）
+            if i == 0 and result.get("language"):
+                detected_language = result["language"]
+            
+            # テキストが有効かチェック（ハルシネーション検出）
+            text = result["text"].strip()
+            if text and not is_hallucination(text):
+                # タイムスタンプを調整して追加
+                for segment in result["segments"]:
+                    adjusted_segment = segment.copy()
+                    adjusted_segment["start"] += time_offset
+                    adjusted_segment["end"] += time_offset
+                    all_segments.append(adjusted_segment)
+                
+                # テキストを結合
+                if full_text and not full_text.endswith(" "):
+                    full_text += " "
+                full_text += text
+            else:
+                st.warning(f"チャンク {i+1} はハルシネーションまたは無音と判定されました。")
+            
+            # 次のチャンクのためのオフセット計算（固定時間を使用）
+            time_offset += chunk_duration_seconds
+                
+        except Exception as e:
+            st.warning(f"チャンク {i+1} の処理でエラーが発生しました: {str(e)}")
+            time_offset += chunk_duration_seconds  # エラーでもオフセットを進める
+            continue
+        finally:
+            # チャンクファイルを削除
+            if os.path.exists(chunk_file):
+                try:
+                    os.unlink(chunk_file)
+                except:
+                    pass
+    
+    # 統合結果を返す
+    return {
+        "text": full_text.strip(),
+        "segments": all_segments,
+        "language": detected_language
+    }
+
+def is_hallucination(text):
+    """
+    ハルシネーション（幻覚）テキストかどうかを判定する
+    
+    Args:
+        text: 判定するテキスト
+    
+    Returns:
+        bool: ハルシネーションの場合True
+    """
+    if not text or len(text.strip()) < 5:
+        return True
+    
+    # 同じフレーズの繰り返しを検出
+    words = text.split()
+    if len(words) < 3:
+        return False
+    
+    # 短いフレーズ（2-4語）の繰り返しを検出
+    for phrase_length in range(2, min(5, len(words) // 3 + 1)):
+        for i in range(len(words) - phrase_length * 3 + 1):
+            phrase = words[i:i + phrase_length]
+            phrase_str = " ".join(phrase)
+            
+            # 同じフレーズが3回以上連続で現れるかチェック
+            remaining_text = " ".join(words[i:])
+            phrase_count = remaining_text.count(phrase_str)
+            
+            if phrase_count >= 3:
+                # フレーズの繰り返しがテキストの大部分を占める場合
+                total_repeated_length = phrase_count * len(phrase_str)
+                if total_repeated_length > len(text) * 0.7:
+                    return True
+    
+    return False
+
+def get_audio_duration(audio_path):
+    """
+    音声ファイルの長さを秒単位で取得する
+    
+    Args:
+        audio_path: 音声ファイルのパス
+    
+    Returns:
+        float: 音声の長さ（秒）
+    """
+    try:
+        audio = AudioSegment.from_file(audio_path)
+        return len(audio) / 1000.0  # ミリ秒を秒に変換
+    except Exception as e:
+        st.error(f"音声ファイルの長さ取得エラー: {str(e)}")
+        return 0.0
 
 def main():
     """メイン関数"""
@@ -119,21 +294,22 @@ def main():
                         st.error("音声ファイルが小さすぎます。有効な音声ファイルをアップロードしてください。")
                         return
                     
-                    # 音声ファイルの基本情報確認（簡素化）
-                    try:
-                        import librosa
-                        audio_data, sample_rate = librosa.load(temp_filename, sr=16000, duration=None)  # Whisperが使用する16kHzに統一
-                        duration = len(audio_data) / sample_rate
-                        st.info(f"音声ファイル情報: 長さ {duration:.1f}秒")
-                        
-                        if duration < 0.5:  # 0.5秒未満
-                            st.error("音声ファイルが短すぎます（0.5秒未満）。より長い音声ファイルをアップロードしてください。")
-                            return
-                        if len(audio_data) == 0:
-                            st.error("音声データが空です。別のファイルを試してください。")
-                            return
-                    except Exception as e:
-                        st.warning(f"音声ファイル情報の取得に失敗: {str(e)}。処理を続行します。")
+                    # 音声ファイルの基本情報確認
+                    duration = get_audio_duration(temp_filename)
+                    if duration == 0:
+                        st.error("音声ファイルの読み込みに失敗しました。別のファイルを試してください。")
+                        return
+                    
+                    st.info(f"音声ファイル情報: 長さ {duration:.1f}秒 ({duration/60:.1f}分)")
+                    
+                    if duration < 0.5:  # 0.5秒未満
+                        st.error("音声ファイルが短すぎます（0.5秒未満）。より長い音声ファイルをアップロードしてください。")
+                        return
+                    
+                    # 10分（600秒）以上の場合はチャンク処理を実行
+                    use_chunking = duration > 600
+                    if use_chunking:
+                        st.warning(f"⚠️ 音声ファイルが10分を超えています（{duration/60:.1f}分）。ハルシネーション防止のため、8分ごとのチャンクに分割して処理します。")
                     
                     # モデルロード
                     load_start = time.time()
@@ -158,8 +334,35 @@ def main():
                     options["temperature"] = 0  # より安定した結果を得る
                     options["beam_size"] = 1 if torch.cuda.is_available() else 5  # GPU使用時は高速化
                         
-                    # 文字起こし実行
-                    result = model.transcribe(temp_filename, **options)
+                    # 文字起こし実行（チャンク処理の条件分岐）
+                    if use_chunking:
+                        # 長い音声ファイルの場合はチャンクに分割して処理
+                        progress_text.text("音声を8分間のチャンクに分割中...")
+                        chunk_files = split_audio_into_chunks(temp_filename, chunk_duration_seconds=480)  # 8分 = 480秒
+                        
+                        if not chunk_files:
+                            st.error("音声分割に失敗しました。")
+                            return
+                        
+                        st.info(f"音声を{len(chunk_files)}個のチャンクに分割しました。順次処理を開始します。")
+                        
+                        # プログレスバーの追加
+                        progress_bar = st.progress(0)
+                        
+                        def progress_callback(message):
+                            progress_text.text(message)
+                            # プログレスバーの更新（概算）
+                            current_chunk = int(message.split()[1].split('/')[0]) if 'チャンク' in message else 1
+                            total_chunks = len(chunk_files)
+                            progress_bar.progress(current_chunk / total_chunks)
+                        
+                        # チャンク単位で転写処理
+                        result = transcribe_chunks(model, chunk_files, options, progress_callback, chunk_duration_seconds=480)
+                        progress_bar.progress(1.0)  # 完了
+                        
+                    else:
+                        # 通常の処理（10分未満の場合）
+                        result = model.transcribe(temp_filename, **options)
                     
                     transcribe_end = time.time()
                     progress_text.empty()
@@ -237,6 +440,12 @@ def main():
             2. 音声ファイルをアップロード
             3. 「文字起こし開始」ボタンをクリック
             4. 結果を確認し、必要に応じてダウンロード
+            
+            **長時間音声の自動チャンク分割機能:**
+            - 10分を超える音声ファイルは自動的に8分間のチャンクに分割されます
+            - これによりハルシネーション（幻覚）を防ぎ、より正確な文字起こしを実現します
+            - 各チャンクは順次処理され、結果は自動的に統合されます
+            - タイムスタンプも適切に調整されます
             
             **モデルサイズについて:**
             - **turbo**: 最新最適化モデル（推奨）- 高精度&高速
