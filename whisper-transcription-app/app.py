@@ -266,7 +266,7 @@ def main():
     # ファイルアップロード
     uploaded_file = st.file_uploader("音声ファイルをアップロード", 
                                     type=["mp3", "wav", "m4a", "ogg", "flac"],
-                                    help="対応フォーマット: MP3, WAV, M4A, OGG, FLAC")
+                                    help="対応フォーマット: MP3, WAV, M4A, OGG, FLAC（最大1GB）")
     
     if uploaded_file is not None:
         # ファイル情報表示
