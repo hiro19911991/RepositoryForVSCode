@@ -7,3 +7,6 @@ numpy>=1.24.0
 soundfile>=0.12.0
 ffmpeg-python>=0.2.0
 pydub>=0.25.1
+# ReazonSpeech: Windows環境での依存関係の問題により、現在は無効化
+# 代替として「Whisper (日本語特化)」オプションを利用してください
+# git+https://github.com/reazon-research/reazonspeech.git#subdirectory=pkg/k2-asr

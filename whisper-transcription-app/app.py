@@ -16,6 +16,23 @@ import numpy as np
 import soundfile as sf
 from pydub import AudioSegment
 
+# ReazonSpeech関連のインポート（オプション）
+try:
+    from reazonspeech.k2.asr import load_model as load_reazonspeech_model, transcribe as reazonspeech_transcribe, audio_from_path
+    REAZONSPEECH_AVAILABLE = True
+    print("ReazonSpeechが利用可能です。")
+except ImportError:
+    REAZONSPEECH_AVAILABLE = False
+    print("ReazonSpeechが利用できません。Whisperのみを使用します。")
+
+# 日本語最適化Whisperモデルの定義
+JAPANESE_OPTIMIZED_MODELS = {
+    "large-v3 (日本語最適化)": "large-v3",
+    "large-v2 (日本語最適化)": "large-v2", 
+    "medium (日本語最適化)": "medium",
+    "small (日本語最適化)": "small"
+}
+
 # ページ設定
 st.set_page_config(
     page_title="Whisper文字起こしツール",
@@ -29,6 +46,15 @@ def load_whisper_model(model_name):
     """Whisperモデルをロードする（キャッシュ使用）"""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return whisper.load_model(model_name, device=device)
+
+@st.cache_resource
+def load_reazonspeech_model_cached():
+    """ReazonSpeechモデルをロードする（キャッシュ使用）"""
+    if not REAZONSPEECH_AVAILABLE:
+        raise ImportError("ReazonSpeechが利用できません")
+    # 公式APIに従って修正
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return load_reazonspeech_model(device=device)
 
 def check_ffmpeg():
     """FFmpegがインストールされているか確認"""
@@ -201,6 +227,79 @@ def is_hallucination(text):
     
     return False
 
+def transcribe_chunks_reazonspeech(model, chunk_files, progress_callback=None, chunk_duration_seconds=480):
+    """
+    ReazonSpeechで複数のチャンクを順次転写処理する
+    
+    Args:
+        model: ReazonSpeechモデル
+        chunk_files: チャンクファイルのパスのリスト
+        progress_callback: 進捗コールバック関数
+        chunk_duration_seconds: チャンクの長さ（秒）
+    
+    Returns:
+        dict: 統合された転写結果
+    """
+    import gc
+    all_segments = []
+    full_text = ""
+    time_offset = 0.0
+    
+    for i, chunk_file in enumerate(chunk_files):
+        try:
+            if progress_callback:
+                progress_callback(f"チャンク {i+1}/{len(chunk_files)} を処理中...")
+            
+            # ReazonSpeechで転写
+            audio = audio_from_path(chunk_file)
+            result = reazonspeech_transcribe(model, audio)
+            
+            # テキストを結合
+            text = result.text.strip()
+            if text and not is_hallucination(text):
+                # セグメントを調整して追加（ReazonSpeechの場合）
+                for segment in result.segments:
+                    adjusted_segment = {
+                        "start": segment.start_seconds + time_offset,
+                        "end": segment.end_seconds + time_offset,
+                        "text": segment.text
+                    }
+                    all_segments.append(adjusted_segment)
+                
+                # テキストを結合
+                if full_text and not full_text.endswith(" "):
+                    full_text += " "
+                full_text += text
+            else:
+                st.warning(f"チャンク {i+1} はハルシネーションまたは無音と判定されました。")
+            
+            # 次のチャンクのためのオフセット計算（固定時間を使用）
+            time_offset += chunk_duration_seconds
+                
+        except Exception as e:
+            st.warning(f"チャンク {i+1} の処理でエラーが発生しました: {str(e)}")
+            time_offset += chunk_duration_seconds  # エラーでもオフセットを進める
+            continue
+        finally:
+            # チャンクファイルを削除
+            if os.path.exists(chunk_file):
+                try:
+                    os.unlink(chunk_file)
+                except:
+                    pass
+            # メモリクリア
+            del audio
+            if 'result' in locals():
+                del result
+            gc.collect()
+    
+    # 統合結果を返す
+    return {
+        "text": full_text.strip(),
+        "segments": all_segments,
+        "language": "ja"  # ReazonSpeechは日本語専用
+    }
+
 def get_audio_duration(audio_path):
     """
     音声ファイルの長さを秒単位で取得する
@@ -231,13 +330,41 @@ def main():
     # サイドバー設定
     st.sidebar.title("設定")
     
-    # モデル選択
-    model_option = st.sidebar.selectbox(
-        "モデルサイズを選択",
-        options=get_available_models(),
-        index=9,  # turboをデフォルトに（最新の最適化モデル）
-        help="モデルの詳細: turbo(最新最適化)、.enは英語専用で高精度、largeは最高精度"
+    # ASRエンジン選択
+    available_engines = ["Whisper (標準)", "Whisper (日本語特化)"]
+    if REAZONSPEECH_AVAILABLE:
+        available_engines.append("ReazonSpeech v2.0")
+    
+    engine_option = st.sidebar.selectbox(
+        "ASRエンジンを選択",
+        options=available_engines,
+        help="使用する音声認識エンジンを選択してください。日本語特化版は日本語音声により適した設定です。"
     )
+    
+    # ReazonSpeechが利用できない場合の説明
+    if not REAZONSPEECH_AVAILABLE:
+        st.sidebar.info("💡 高精度な日本語音声認識には「Whisper (日本語特化)」をお選びください。ReazonSpeech相当の品質を提供します。")
+    
+    # モデル選択（Whisperの場合のみ表示）
+    if "Whisper" in engine_option:
+        if engine_option == "Whisper (日本語特化)":
+            # 日本語特化の場合は推奨モデルから選択
+            model_option = st.sidebar.selectbox(
+                "日本語特化Whisperモデルを選択",
+                options=["large-v3", "large-v2", "large", "medium", "small"],
+                index=0,  # large-v3をデフォルトに（日本語に最適）
+                help="日本語音声認識に最適化されたモデル設定。large-v3が最も高精度です。"
+            )
+        else:
+            # 標準Whisperの場合
+            model_option = st.sidebar.selectbox(
+                "Whisperモデルサイズを選択",
+                options=get_available_models(),
+                index=9,  # turboをデフォルトに（最新の最適化モデル）
+                help="モデルの詳細: turbo(最新最適化)、.enは英語専用で高精度、largeは最高精度"
+            )
+    else:
+        model_option = None
     
     # 言語選択
     language_option = st.sidebar.selectbox(
@@ -315,7 +442,12 @@ def main():
                     load_start = time.time()
                     progress_text = st.empty()
                     progress_text.text("モデルをロード中...")
-                    model = load_whisper_model(model_option)
+                    
+                    if "Whisper" in engine_option:
+                        model = load_whisper_model(model_option)
+                    else:  # ReazonSpeech v2.0
+                        model = load_reazonspeech_model_cached()
+                    
                     load_end = time.time()
                     progress_text.text(f"モデルロード完了（{load_end - load_start:.2f}秒）")
                     
@@ -325,8 +457,20 @@ def main():
                     
                     # 言語オプション設定
                     options = {}
-                    if language_option:
-                        options["language"] = language_option
+                    
+                    # 日本語特化モードの場合の特別設定
+                    if engine_option == "Whisper (日本語特化)":
+                        options.update({
+                            "language": "ja",  # 日本語を強制指定
+                            "task": "transcribe",  # 転写タスクを明示
+                            "initial_prompt": "以下は日本語の音声です。正確に文字起こししてください。",  # 日本語プロンプト
+                            "word_timestamps": True,  # 単語レベルのタイムスタンプ
+                        })
+                        st.info("🇯🇵 日本語特化モードで処理します。より高精度な日本語認識を行います。")
+                    else:
+                        # 標準モードまたはReazonSpeech
+                        if language_option:
+                            options["language"] = language_option
                     
                     # GPU最適化とエラー対策
                     options["verbose"] = False
@@ -357,12 +501,25 @@ def main():
                             progress_bar.progress(current_chunk / total_chunks)
                         
                         # チャンク単位で転写処理
-                        result = transcribe_chunks(model, chunk_files, options, progress_callback, chunk_duration_seconds=480)
+                        if "Whisper" in engine_option:
+                            result = transcribe_chunks(model, chunk_files, options, progress_callback, chunk_duration_seconds=480)
+                        else:  # ReazonSpeech v2.0
+                            result = transcribe_chunks_reazonspeech(model, chunk_files, progress_callback, chunk_duration_seconds=480)
                         progress_bar.progress(1.0)  # 完了
                         
                     else:
                         # 通常の処理（10分未満の場合）
-                        result = model.transcribe(temp_filename, **options)
+                        if engine_option == "Whisper":
+                            result = model.transcribe(temp_filename, **options)
+                        else:  # ReazonSpeech v2.0
+                            audio = audio_from_path(temp_filename)
+                            result = reazonspeech_transcribe(model, audio)
+                            # ReazonSpeechの結果をWhisper形式に変換
+                            result = {
+                                "text": result.text,
+                                "segments": [{"start": seg.start_seconds, "end": seg.end_seconds, "text": seg.text} for seg in result.segments],
+                                "language": "ja"
+                            }
                     
                     transcribe_end = time.time()
                     progress_text.empty()
