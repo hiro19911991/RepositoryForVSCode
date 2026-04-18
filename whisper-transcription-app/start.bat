@@ -1,29 +1,46 @@
 @echo off
 chcp 65001 > nul
 echo ====================================
-echo Whisper文字起こしツール 起動中...
+echo Whisper Transcription Tool Starting...
 echo ====================================
 echo.
 
-REM GPU状況確認
-echo GPU状況を確認中...
+REM GPU check
+echo Checking GPU status...
 python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU name:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'No GPU')"
 echo.
 
-REM 仮想環境の確認
+REM Virtual environment check
 if exist venv\ (
-    echo 仮想環境を有効化しています...
+    echo Activating virtual environment...
     call venv\Scripts\activate.bat
 ) else (
-    echo 注意: 仮想環境が見つかりません。グローバル環境を使用します。
+    echo Warning: virtual environment not found. Using global environment.
 )
 
 echo.
-echo Streamlitアプリケーションを起動しています...
-echo ブラウザで http://localhost:8501 にアクセスしてください
+echo Starting Streamlit application...
+echo Open http://localhost:8501 in your browser
 echo.
-echo 終了するには Ctrl+C を押してください
+echo Press Ctrl+C to stop
 echo.
+
+echo Running preflight syntax check...
+python -m py_compile app.py
+if errorlevel 1 (
+    echo Error: app.py has syntax issues. Please fix before starting Streamlit.
+    pause
+    exit /b 1
+)
+
+echo Checking unresolved merge conflict markers...
+findstr /n /r "^<<<<<<< ^======= ^>>>>>>>" app.py > nul
+if %errorlevel%==0 (
+    echo Error: unresolved merge markers found in app.py.
+    echo Please remove lines that start with ^<^<^<^<^<^<^<, =======, or ^>^>^>^>^>^>^>.
+    pause
+    exit /b 1
+)
 
 streamlit run app.py
 
