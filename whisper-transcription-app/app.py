@@ -565,7 +565,7 @@ def main():
                         if use_diarization and hf_token:
                             try:
                                 progress_text.text("話者分離処理中（WhisperX）...")
-                                diarize_model = whisperx.DiarizationPipeline(token=hf_token, device=device_str)
+                                diarize_model = whisperx.diarize.DiarizationPipeline(token=hf_token, device=device_str)
                                 diarize_kwargs = {}
                                 if diarization_num_speakers > 0:
                                     diarize_kwargs["num_speakers"] = diarization_num_speakers
