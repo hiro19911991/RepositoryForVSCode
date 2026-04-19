@@ -783,80 +783,92 @@ def main():
                     transcribe_time = transcribe_end - transcribe_start
                     total_time = transcribe_end - load_start
                     
-                    # 結果表示
-                    st.markdown("### 📝 文字起こし結果")
-                    st.success(f"処理完了（文字起こし: {transcribe_time:.2f}秒、合計: {total_time:.2f}秒）")
-                    
-                    # テキスト結果表示
-                    st.markdown("#### 基本テキスト")
-                    st.text_area("文字起こし結果", value=result["text"], height=200)
-                    
-                    st.download_button(
-                        label="📥 テキストをダウンロード",
-                        data=result["text"],
-                        file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt",
-                        mime="text/plain"
+                    # 結果をsession_stateに保存
+                    st.session_state['transcription_result'] = result
+                    st.session_state['transcription_speakers'] = speaker_segments
+                    st.session_state['transcription_time'] = transcribe_time
+                    st.session_state['transcription_total_time'] = total_time
+                    st.session_state['transcription_engine'] = engine_option
+                    st.session_state['transcription_word_align'] = (
+                        whisperx_word_align if engine_option == "WhisperX (高速・単語精度)" else False
                     )
-                    
-                    # 話者付きテキスト表示
-                    if speaker_segments:
-                        st.markdown("#### 🎭 話者付きテキスト")
-                        speaker_text = ""
-                        for seg in speaker_segments:
-                            speaker_text += f"[{seg['speaker']}] {seg['text']}\n"
-                        
-                        st.text_area("話者付き文字起こし結果", value=speaker_text, height=250)
-                        
-                        st.download_button(
-                            label="📥 話者付きテキストをダウンロード",
-                            data=speaker_text,
-                            file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript_speakers.txt",
-                            mime="text/plain"
-                        )
-                    
-                    # タイムスタンプ付きの詳細結果
-                    with st.expander("🕐 詳細（タイムスタンプ付き）"):
-                        segments_to_display = speaker_segments if speaker_segments else result["segments"]
+                    st.session_state['result_file'] = uploaded_file.name
 
-                        for seg in segments_to_display:
-                            start_time = seg["start"]
-                            end_time = seg["end"]
-                            text = seg["text"]
-
-                            start_formatted = str(datetime.utcfromtimestamp(start_time).strftime('%H:%M:%S.%f'))[:-3]
-                            end_formatted = str(datetime.utcfromtimestamp(end_time).strftime('%H:%M:%S.%f'))[:-3]
-
-                            if "speaker" in seg:
-                                st.write(f"**[{seg['speaker']}]** `{start_formatted}` → `{end_formatted}`: {text}")
-                            else:
-                                st.write(f"`{start_formatted}` → `{end_formatted}`: {text}")
-
-                    # WhisperX 単語レベルのタイムスタンプ
-                    if engine_option == "WhisperX (高速・単語精度)" and whisperx_word_align:
-                        with st.expander("📝 単語レベルのタイムスタンプ（WhisperX）"):
-                            for seg in result["segments"]:
-                                words = seg.get("words", [])
-                                if not words:
-                                    continue
-                                speaker_label = f"**[{seg['speaker']}]** " if "speaker" in seg else ""
-                                word_parts = []
-                                for w in words:
-                                    w_start = datetime.fromtimestamp(w.get("start", 0), tz=timezone.utc).strftime('%H:%M:%S.%f')[:-3]
-                                    word_parts.append(f"`{w_start}` {w['word']}")
-                                st.markdown(f"{speaker_label}" + "　".join(word_parts))
-                
                 except Exception as e:
                     st.error(f"❌ エラーが発生しました: {str(e)}")
                     import traceback
                     st.error(traceback.format_exc())
-                
+
                 finally:
                     if os.path.exists(temp_filename):
                         try:
                             os.unlink(temp_filename)
                         except:
                             pass
-    
+
+        # 結果表示（session_stateから — ダウンロード後も保持）
+        if st.session_state.get('result_file') == uploaded_file.name and 'transcription_result' in st.session_state:
+            _result = st.session_state['transcription_result']
+            _speakers = st.session_state['transcription_speakers']
+            _t_time = st.session_state['transcription_time']
+            _total = st.session_state['transcription_total_time']
+            _engine = st.session_state['transcription_engine']
+            _word_align = st.session_state['transcription_word_align']
+
+            st.markdown("### 📝 文字起こし結果")
+            st.success(f"処理完了（文字起こし: {_t_time:.2f}秒、合計: {_total:.2f}秒）")
+
+            st.markdown("#### 基本テキスト")
+            st.text_area("文字起こし結果", value=_result["text"], height=200)
+
+            st.download_button(
+                label="📥 テキストをダウンロード",
+                data=_result["text"],
+                file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt",
+                mime="text/plain"
+            )
+
+            if _speakers:
+                st.markdown("#### 🎭 話者付きテキスト")
+                speaker_text = ""
+                for seg in _speakers:
+                    speaker_text += f"[{seg['speaker']}] {seg['text']}\n"
+
+                st.text_area("話者付き文字起こし結果", value=speaker_text, height=250)
+
+                st.download_button(
+                    label="📥 話者付きテキストをダウンロード",
+                    data=speaker_text,
+                    file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript_speakers.txt",
+                    mime="text/plain"
+                )
+
+            with st.expander("🕐 詳細（タイムスタンプ付き）"):
+                segments_to_display = _speakers if _speakers else _result["segments"]
+                for seg in segments_to_display:
+                    start_time = seg["start"]
+                    end_time = seg["end"]
+                    text = seg["text"]
+                    start_formatted = datetime.fromtimestamp(start_time, tz=timezone.utc).strftime('%H:%M:%S.%f')[:-3]
+                    end_formatted = datetime.fromtimestamp(end_time, tz=timezone.utc).strftime('%H:%M:%S.%f')[:-3]
+                    if "speaker" in seg:
+                        st.write(f"**[{seg['speaker']}]** `{start_formatted}` → `{end_formatted}`: {text}")
+                    else:
+                        st.write(f"`{start_formatted}` → `{end_formatted}`: {text}")
+
+            if _engine == "WhisperX (高速・単語精度)" and _word_align:
+                with st.expander("📝 単語レベルのタイムスタンプ（WhisperX）"):
+                    for seg in _result["segments"]:
+                        words = seg.get("words", [])
+                        if not words:
+                            continue
+                        speaker_label = f"**[{seg['speaker']}]** " if "speaker" in seg else ""
+                        word_parts = []
+                        for w in words:
+                            w_start = datetime.fromtimestamp(w.get("start", 0), tz=timezone.utc).strftime('%H:%M:%S.%f')[:-3]
+                            word_parts.append(f"`{w_start}` {w['word']}")
+                        st.markdown(f"{speaker_label}" + "　".join(word_parts))
+
     else:
         st.info("👆 音声ファイルをアップロードしてください")
         
