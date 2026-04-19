@@ -30,7 +30,7 @@ except ImportError:
 
 # ReazonSpeech関連のインポート（オプション）
 try:
-    from reazonspeech.k2.asr import load_model as load_reazonspeech_model, transcribe as reazonspeech_transcribe, audio_from_path
+    from reazonspeech.k2.asr import load_model as load_reazonspeech_model, transcribe as reazonspeech_transcribe
     REAZONSPEECH_AVAILABLE = True
     print("✅ ReazonSpeechが利用可能です。")
 except ImportError:
@@ -309,14 +309,18 @@ def main():
     available_engines = ["Whisper (標準)", "Whisper (日本語特化)"]
     if WHISPERX_AVAILABLE:
         available_engines.append("WhisperX (高速・単語精度)")
-    if REAZONSPEECH_AVAILABLE:
-        available_engines.append("ReazonSpeech v2.0")
+    # ReazonSpeech K2はWindows+CPU版sherpa-onnxで動作しないため除外
+    # if REAZONSPEECH_AVAILABLE:
+    #     available_engines.append("ReazonSpeech v2.0")
 
     engine_option = st.sidebar.selectbox(
         "ASRエンジンを選択",
         options=available_engines,
         help="使用する音声認識エンジンを選択してください。"
     )
+
+    if REAZONSPEECH_AVAILABLE:
+        st.sidebar.info("ℹ️ ReazonSpeech v2.0 はWindows環境では動作しないため無効化しています。")
 
     # モデル選択
     if engine_option in ("Whisper (標準)", "Whisper (日本語特化)"):
@@ -418,18 +422,59 @@ def main():
     diarization_num_speakers = 0
     diarization_min_speakers = 1
     diarization_max_speakers = 8
-    
+
+    SECRETS_PATH = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
+
+    def load_saved_hf_token():
+        if os.path.exists(SECRETS_PATH):
+            try:
+                import tomllib
+            except ImportError:
+                try:
+                    import tomli as tomllib
+                except ImportError:
+                    return ""
+            with open(SECRETS_PATH, "rb") as f:
+                data = tomllib.load(f)
+            return data.get("hf_token", "")
+        return ""
+
+    def save_hf_token(token):
+        os.makedirs(os.path.dirname(SECRETS_PATH), exist_ok=True)
+        existing = {}
+        if os.path.exists(SECRETS_PATH):
+            try:
+                import tomllib
+            except ImportError:
+                try:
+                    import tomli as tomllib
+                except ImportError:
+                    tomllib = None
+            if tomllib:
+                with open(SECRETS_PATH, "rb") as f:
+                    existing = tomllib.load(f)
+        existing["hf_token"] = token
+        lines = [f'{k} = {repr(v)}' for k, v in existing.items()]
+        with open(SECRETS_PATH, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
     if use_diarization:
         if not PYANNOTE_AVAILABLE:
             st.sidebar.error("❌ pyannote.audioがインストールされていません。")
             st.sidebar.info("インストール: pip install pyannote.audio")
             use_diarization = False
         else:
+            saved_token = load_saved_hf_token()
             hf_token = st.sidebar.text_input(
                 "Hugging Face Access Token",
+                value=saved_token,
                 type="password",
                 help="pyannote/speaker-diarizationの利用には Hugging Face トークンが必要です。https://huggingface.co/settings/tokens"
             ).strip()
+            if st.sidebar.button("トークンを保存", help="入力したトークンをローカルに保存します"):
+                if hf_token:
+                    save_hf_token(hf_token)
+                    st.sidebar.success("✅ トークンを保存しました")
             
             diarization_num_speakers = st.sidebar.number_input(
                 "話者数（0で自動推定）",
@@ -464,11 +509,17 @@ def main():
     )
     
     if uploaded_file is not None:
+        # 別ファイルがアップロードされたら結果をクリア
+        if st.session_state.get('result_file') != uploaded_file.name:
+            for k in ['transcription_result', 'transcription_speakers', 'transcription_time',
+                      'transcription_total_time', 'transcription_engine', 'transcription_word_align', 'result_file']:
+                st.session_state.pop(k, None)
+
         file_size_mb = uploaded_file.size / (1024 * 1024)
         st.info(f"ファイル: {uploaded_file.name} ({file_size_mb:.2f} MB)")
-        
+
         st.audio(uploaded_file, format=f"audio/{uploaded_file.name.split('.')[-1]}")
-        
+
         transcribe_button = st.button("文字起こし開始", type="primary")
         
         if transcribe_button:
@@ -614,9 +665,12 @@ def main():
                         if engine_option == "ReazonSpeech v2.0":
                             # === ReazonSpeech フロー ===
                             from reazonspeech.k2.asr.interface import TranscribeConfig
+                            from reazonspeech.k2.asr import audio_from_numpy
                             st.info("🇯🇵 ReazonSpeech v2.0 (sherpa-onnx) で文字起こし中...")
                             config = TranscribeConfig(verbose=False)
-                            audio = audio_from_path(temp_filename)
+                            raw_array, _ = librosa.load(temp_filename, sr=16000, mono=True)
+                            raw_array = np.ascontiguousarray(raw_array.astype(np.float32))
+                            audio = audio_from_numpy(raw_array, 16000)
                             rs_result = reazonspeech_transcribe(model, audio, config=config)
 
                             # サブワードから時間付きセグメントを生成（2秒間隔でグループ化）
